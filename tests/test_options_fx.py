@@ -1,4 +1,4 @@
-"""Vérifications du projet 06 : GK, grecques, conventions de delta, smile vanna-volga, Monte Carlo, arbitrage."""
+"""Vérifications : GK, grecques, conventions de delta, smile vanna-volga, butterfly de marché, Monte Carlo, arbitrage."""
 import numpy as np
 import pytest
 from scipy.special import ndtr
@@ -6,7 +6,7 @@ from scipy.special import ndtr
 from fxopt import garman_kohlhagen as gk
 from fxopt.deltas import CONVENTIONS, delta, strike_atm, strike_depuis_delta
 from fxopt.monte_carlo import gbm_terminal, prix_mc
-from fxopt.vanna_volga import SmileVV
+from fxopt.vanna_volga import SmileVV, bf_smile_depuis_marche, strangle_de_marche
 
 S, T, RD, RF, SIG = 1.10, 0.25, 0.04, 0.02, 0.08
 
@@ -140,3 +140,23 @@ def test_arbitrage_papillon_cas_extreme_documente():
     sm = SmileVV(1.10, 1 / 12, 0.04, 0.02, 0.07, -0.03, 0.015)
     K = np.linspace(sm.K[0] * 0.97, sm.K[2] * 1.03, 80)
     assert sm.densite(K).min() < -0.1
+
+
+# ---------------------------------------------------------------- (h) butterfly de marché (broker fly) contre BF smile
+@pytest.mark.parametrize("conv,type_atm", [("spot", "dns"), ("forward", "forward"), ("spot_pa", "dns_pa")])
+def test_bf_marche_le_smile_reprice_le_strangle_de_marche(conv, type_atm):
+    """Le smile issu d'un BF de marché reprice le strangle à vol unique (strikes 25D calculés à ATM + BF_marché)."""
+    a = (1.08, 1 / 12, 0.045, 0.025)
+    atm, rr, bf_marche = 0.07, -0.004, 0.002
+    sm = SmileVV.depuis_marche(*a, atm, rr, bf_marche, conv=conv, type_atm=type_atm)
+    kc, kp, cible = strangle_de_marche(*a, atm, bf_marche, conv)
+    parite_put = a[0] * np.exp(-a[3] * a[1]) - kp * np.exp(-a[2] * a[1])      # call - put au strike kp
+    assert sm.prix_call(kc) + sm.prix_call(kp) - parite_put == pytest.approx(cible, abs=1e-12)
+    assert np.allclose(sm.vol(sm.K), sm.vols, atol=1e-9)                       # le smile repasse toujours par ses pivots
+
+
+def test_bf_marche_different_du_bf_smile_mais_proche():
+    """Les deux butterflies ne sont pas égaux (strikes et vols différents) mais l'écart est petit à 1M."""
+    a = (1.08, 1 / 12, 0.045, 0.025)
+    bf_smile = bf_smile_depuis_marche(*a, 0.07, -0.004, 0.002)
+    assert 1e-5 < abs(bf_smile - 0.002) < 5e-4          # non nul, de l'ordre du centième de point de vol

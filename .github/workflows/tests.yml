@@ -18,7 +18,7 @@ jobs:
       - name: Dépendances
         run: pip install -r requirements.txt
 
-      - name: Tests (42 vérifications)
+      - name: Tests
         run: pytest -q
 
       - name: Exemple EURUSD 1M (cotations illustratives)

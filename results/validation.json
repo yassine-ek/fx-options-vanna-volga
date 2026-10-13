@@ -148,6 +148,11 @@
       }
     },
     "ecart_max_cm_vs_exact_points_de_vol": 0.09353713465769103,
+    "reprice_strangle_de_marche_ecart_prix": {
+      "spot/dns": 5.204170427930421e-17,
+      "forward/forward": 1.6306400674181987e-16,
+      "spot_pa/dns_pa": 3.122502256758253e-17
+    },
     "densite_min_cotations_raisonnables": 1.187967399157844,
     "densite_min_cas_extreme": -4.1126401891271085,
     "cas_extreme": {

@@ -5,7 +5,7 @@ COTATIONS EURUSD 1M ILLUSTRATIVES, PAS DES DONNÉES DE MARCHÉ : tout est calcul
 Monte Carlo). Rien n'est tapé à la main dans le README : les blocs sont réécrits à partir de results/.
 
 Usage (depuis la racine du projet) :  python scripts/generer_vitrine_06.py
-Lit    : results/exemple_eurusd_1m.json (cotations), results/pytest_resultat.txt (sortie de pytest)
+Lit    : results/exemple_eurusd_1m.json (cotations)
 Écrit  : results/validation.json, results/variantes_conventions.json,
          figures/hero_smile.png, figures/variantes_conventions.png, figures/validation_erreurs.png,
          et les blocs <!-- BEGIN:nom --> ... <!-- END:nom --> de README.md
@@ -28,7 +28,7 @@ sys.path.insert(0, str(RACINE))
 from fxopt import garman_kohlhagen as gk
 from fxopt.deltas import CONVENTIONS, delta, strike_atm, strike_depuis_delta
 from fxopt.monte_carlo import gbm_terminal, prix_mc
-from fxopt.vanna_volga import SmileVV
+from fxopt.vanna_volga import SmileVV, bf_smile_depuis_marche, strangle_de_marche
 
 RES, FIG = RACINE / "results", RACINE / "figures"
 FIG.mkdir(exist_ok=True)
@@ -164,7 +164,16 @@ def calculer_validation():
     Kd = np.linspace(sm.K[0] * 0.97, sm.K[2] * 1.03, 80)
     extr = SmileVV(1.10, 1 / 12, 0.04, 0.02, 0.07, -0.03, 0.015)
     Ke = np.linspace(extr.K[0] * 0.97, extr.K[2] * 1.03, 80)
+    # butterfly de marché : le smile issu de `depuis_marche` reprice le strangle de marché (call + put à vol unique)
+    reprice = {}
+    for conv, type_atm in (("spot", "dns"), ("forward", "forward"), ("spot_pa", "dns_pa")):
+        a = (1.10, 1 / 12, 0.04, 0.02)
+        smm = SmileVV.depuis_marche(*a, 0.07, -0.01, 0.0025, conv=conv, type_atm=type_atm)
+        kc, kp, cible = strangle_de_marche(*a, 0.07, 0.0025, conv)
+        parite_put = a[0] * np.exp(-a[3] * a[1]) - kp * np.exp(-a[2] * a[1])
+        reprice[f"{conv}/{type_atm}"] = abs(float(smm.prix_call(kc) + smm.prix_call(kp) - parite_put - cible))
     v["smile"] = {"pivots": pivots, "ecart_max_cm_vs_exact_points_de_vol": ecart_cm,
+                  "reprice_strangle_de_marche_ecart_prix": reprice,
                   "densite_min_cotations_raisonnables": float(sm.densite(Kd).min()),
                   "densite_min_cas_extreme": float(extr.densite(Ke).min()),
                   "cas_extreme": {"ATM": 0.07, "RR25": -0.03, "BF25": 0.015}}
@@ -194,6 +203,16 @@ def calculer_variantes(ex):
         out["conventions"][conv] = d
         if conv == "spot":
             ref = d
+    cas = (("cotations de l'exemple", atm, rr, bf), ("cas large (RR -1,0 ; BF 0,75)", 0.07, -0.010, 0.0075),
+           ("cas extrême (RR -3,0 ; BF 1,5)", 0.07, -0.03, 0.015))
+    out["butterfly_marche"] = []
+    for nom, a_, r_, b_ in cas:
+        s_smile = SmileVV(S0, T0, rd, rf, a_, r_, b_)
+        s_marche = SmileVV.depuis_marche(S0, T0, rd, rf, a_, r_, b_)
+        Kc = np.linspace(s_smile.K[0] * 0.97, s_smile.K[2] * 1.03, 60)
+        out["butterfly_marche"].append({"cas": nom, "ATM": a_, "RR25": r_, "BF_marche": b_, "BF_smile_equivalent": s_marche.bf,
+                                        "ecart_bf_points_de_vol": (s_marche.bf - b_) * 100,
+                                        "ecart_max_vol_points": float(np.max(np.abs(s_marche.vol(Kc) - s_smile.vol(Kc))) * 100)})
     for conv, d in out["conventions"].items():
         d["ecart_vv_vs_spot_bp_vol"] = [(a - b) * 1e4 for a, b in zip(d["vv_sur_grille"], ref["vv_sur_grille"])]
         d["ecart_strikes_pivots_vs_spot_pips"] = [(a - b) * 1e4 for a, b in zip(d["K_pivots"], ref["K_pivots"])]
@@ -202,31 +221,34 @@ def calculer_variantes(ex):
 
 # ------------------------------------------------------------------ figures
 def fig_hero(ex):
+    """Figure héro : 2 panneaux, 10 x 4,6 pouces, textes >= 11 pt (lisible une fois réduite à la largeur du README)."""
     e = ex["entrees"]
     sm = SmileVV(e["S"], e["T_ans"], e["rd"], e["rf"], e["ATM"], e["RR25"], e["BF25"], conv="spot", type_atm="dns")
     K = np.linspace(sm.K[0] * 0.97, sm.K[2] * 1.03, 200)
     vv, cm = sm.vol(K) * 100, sm.vol_cm(K) * 100
     dK = gk.grecques(sm.S, K, sm.T, sm.rd, sm.rf, vv / 100)["delta_spot"]
     d_piv = [float(gk.grecques(sm.S, k, sm.T, sm.rd, sm.rf, vol)["delta_spot"]) for k, vol in zip(sm.K, sm.vols)]
-    noms = ["25D put", "ATM (DNS)", "25D call"]
-    fig, ax = plt.subplots(1, 2, figsize=(13, 4.8))
-    ax[0].axhline(e["ATM"] * 100, color="grey", ls=":", lw=1.2, label=f"vol plate = ATM ({nb(e['ATM'] * 100)} %), Black-Scholes")
-    ax[0].plot(K, vv, color="#2f6fb0", lw=2.2, label="vanna-volga exact")
-    ax[0].plot(K, cm, color="#e08a1e", ls="--", lw=1.6, label="Castagna-Mercurio, 1er ordre")
-    ax[0].scatter(sm.K, sm.vols * 100, c="k", s=55, zorder=4, label="points de cotation (pivots)")
-    for k, vol, nom in zip(sm.K, sm.vols * 100, noms):
-        ax[0].annotate(f"{nom}\nK = {k:.4f}\nvol {nb(vol)} %", (k, vol), textcoords="offset points", xytext=(0, 12 if nom != "ATM (DNS)" else -44),
-                       ha="center", fontsize=8)
-    ax[0].set_ylim(6.6, None)
-    ax[0].set_xlabel("strike K"), ax[0].set_ylabel("volatilité implicite (%)"), ax[0].set_title("Smile vs strike")
-    ax[0].legend(fontsize=8, loc="upper center")
-    ax[1].plot(dK, vv, color="#2f6fb0", lw=2.2)
-    ax[1].scatter(d_piv, sm.vols * 100, c="k", s=55, zorder=4)
-    ax[1].set_xlabel("delta call spot (axe inversé : strikes croissants vers la droite)"), ax[1].set_title("Smile vs delta")
-    ax[1].invert_xaxis()
-    fig.suptitle(f"EURUSD 1M, {AVERT}. Cotations : ATM {nb(e['ATM'] * 100)} %, RR25 {nb(e['RR25'] * 100)} pt, BF25 {nb(e['BF25'] * 100)} pt, "
-                 f"S = {nb(e['S'], 4)}, rd = {nb(e['rd'] * 100)} %, rf = {nb(e['rf'] * 100)} %", fontsize=10, y=1.02)
-    sauver(fig, "hero_smile.png")
+    noms = ["25D put", "ATM", "25D call"]
+    with plt.rc_context({"font.size": 11, "axes.titlesize": 12, "axes.labelsize": 11, "legend.fontsize": 11,
+                         "xtick.labelsize": 11, "ytick.labelsize": 11}):
+        fig, ax = plt.subplots(1, 2, figsize=(10, 4.6))
+        ax[0].axhline(e["ATM"] * 100, color="grey", ls=":", lw=1.4, label="vol plate (ATM)")
+        ax[0].plot(K, vv, color="#2f6fb0", lw=2.4, label="vanna-volga exact")
+        ax[0].plot(K, cm, color="#e08a1e", ls="--", lw=1.8, label="Castagna-Mercurio")
+        ax[0].scatter(sm.K, sm.vols * 100, c="k", s=60, zorder=4, label="cotations (pivots)")
+        for k, vol, nom, dec in zip(sm.K, sm.vols * 100, noms, ((-8, 10), (0, -42), (34, -30))):
+            ax[0].annotate(f"{nom}\n{nb(vol)} %", (k, vol), textcoords="offset points", xytext=dec,
+                           ha="center", fontsize=11)
+        ax[0].set_ylim(6.2, 9.4)
+        ax[0].set_xlabel("strike K"), ax[0].set_ylabel("volatilité implicite (%)"), ax[0].set_title("Smile contre le strike")
+        ax[0].legend(loc="upper center", frameon=False)
+        ax[1].plot(dK, vv, color="#2f6fb0", lw=2.4)
+        ax[1].scatter(d_piv, sm.vols * 100, c="k", s=60, zorder=4)
+        ax[1].set_xlabel("delta call spot (axe inversé)"), ax[1].set_title("Smile contre le delta")
+        ax[1].invert_xaxis()
+        fig.suptitle("Smile vanna-volga EURUSD 1M (cotations illustratives)", fontsize=12.5, y=1.0)
+        fig.tight_layout()
+        sauver(fig, "hero_smile.png")
 
 
 def fig_variantes(var):
@@ -256,7 +278,7 @@ def lignes_validation(v):
     p, g, d, s = v["prix"], v["grecques"]["max_erreur_relative"], v["deltas"], v["smile"]
     ar = d["aller_retour_max_erreur_relative_strike"]
     return [
-        ("Prix : GK contre Black-Scholes sur le spot (5 strikes x call/put)", p["max_ecart_bsm_5_strikes"], 1e-13, "prix"),
+        ("Prix : GK contre sa réécriture Black-Scholes-Merton sur le spot (même formule, 5 strikes x call/put)", p["max_ecart_bsm_5_strikes"], 1e-13, "prix"),
         (f"Prix : Monte Carlo ({nb(p['n_chemins_mc'], 0)} chemins antithétiques) contre GK, z maximal en valeur absolue sur 8 cas", p["max_abs_z_mc"], 3.0, "prix"),
         ("Parité call - put, 25 strikes", v["parite"]["max_ecart_parite"], 1e-14, "parité"),
         ("Call = put au strike forward", v["parite"]["ecart_call_put_au_forward"], 1e-14, "parité"),
@@ -271,6 +293,7 @@ def lignes_validation(v):
         ("Smile VV : écart aux 3 pivots, approximation CM", max(x["ecart_vol_cm"] for x in s["pivots"].values()), 1e-9, "smile"),
         ("Smile VV : pivots bien au delta 25", max(x["ecart_delta_25"] for x in s["pivots"].values()), 1e-9, "smile"),
         ("Smile VV : écart CM contre exact (points de vol, sur [K25P -3 %, K25C +3 %])", s["ecart_max_cm_vs_exact_points_de_vol"], 0.2, "smile"),
+        ("Smile VV issu d'un BF de marché : reprice du strangle de marché à vol unique (3 couples convention / ATM)", max(s["reprice_strangle_de_marche_ecart_prix"].values()), 1e-12, "smile"),
     ]
 
 
@@ -292,40 +315,76 @@ def fig_validation(v):
 
 # ------------------------------------------------------------------ blocs de README
 def bloc_badges():
-    n = re.search(r"(\d+) passed", (RES / "pytest_resultat.txt").read_text(encoding="utf-8")).group(1)
     return "\n".join([
+        "[![tests](https://github.com/yassine-ek/fx-options-vanna-volga/actions/workflows/tests.yml/badge.svg)]"
+        "(https://github.com/yassine-ek/fx-options-vanna-volga/actions/workflows/tests.yml)",
         "![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)",
-        f"![tests](https://img.shields.io/badge/tests-{n}%20passed-brightgreen)",
         "![licence MIT](https://img.shields.io/badge/licence-MIT-blue)",
         "![données](https://img.shields.io/badge/donn%C3%A9es%20de%20march%C3%A9-aucune-lightgrey)",
+    ])
+
+
+def bloc_cles(ex, v, var):
+    p, g, d, s = v["prix"], v["grecques"]["max_erreur_relative"], v["deltas"], v["smile"]
+    zs = [l["z_mc"] for l in p["lignes"]]
+    signes = "tous du même signe et corrélés car tirés sur les mêmes chemins" if (all(z < 0 for z in zs) or all(z > 0 for z in zs)) else "corrélés car tirés sur les mêmes chemins"
+    ar = max(d["aller_retour_max_erreur_relative_strike"].values())
+    spot = var["conventions"]["spot"]["K_pivots"]
+    pips = max(abs((var["conventions"][c]["K_pivots"][i] - spot[i]) * 1e4) for c in ("spot_pa", "forward_pa") for i in (0, 2))   # strikes 25D put et call
+    pb = max(abs(x) for c in CONVENTIONS for x in var["conventions"][c]["ecart_vv_vs_spot_bp_vol"])
+    ex_bf = var["butterfly_marche"][0]
+    pire_g = max(g.values())
+    ok_cm = ex["ecart_max_CM_vs_exact_vol_points"]
+    return "\n".join([
+        f"- **Pricer Garman-Kohlhagen cohérent avec lui-même** : GK et sa réécriture Black-Scholes-Merton sur le spot coïncident à {sci(p['max_ecart_bsm_5_strikes'])}. "
+        f"*Réserve : c'est une cohérence entre deux écritures de la même formule (forward contre spot), pas une validation externe ; les grecques sont validées contre des différences finies "
+        f"(écart relatif maximal {sci(pire_g)}) et les prix contre Monte Carlo (|z| ≤ {nb(max(abs(z) for z in zs))} sur 8 cas, {signes} : pas huit validations indépendantes). "
+        "Aucune référence externe (QuantLib, tables publiées) n'est utilisée.*",
+        f"- **Quatre conventions de delta, avec conversion strike ↔ delta** : aller-retour exact à {sci(ar)} près, delta d'un call premium-adjusted non monotone géré (branche haute, maximum {nb(d['call_pa_non_monotone']['delta_max'], 4)}). "
+        f"Le même « 25 delta » change de strike d'environ {nb(pips, 1)} pips entre delta spot et premium-adjusted, soit jusqu'à {nb(pb, 1)} pb de vol lus de travers. "
+        "*Réserve : cotations EURUSD 1M illustratives, aucune donnée de marché.*",
+        f"- **Smile vanna-volga** : repasse par les 3 cotations (écart {sci(max(x['ecart_vol_exacte'] for x in s['pivots'].values()))}), approximation de Castagna-Mercurio à {nb(ok_cm, 3)} point de vol de l'exact, "
+        f"densité négative mise en évidence dans un cas extrême (VV n'exclut pas l'arbitrage). Le BF de marché (broker) est géré en plus du BF smile : écart de {nb(ex_bf['ecart_max_vol_points'], 3)} point de vol sur les cotations de l'exemple. "
+        "*Réserve : cohérence interne seulement, aucun calibrage ni smile de marché ; un seul smile 1M, ni structure par terme ni pricing d'exotique.*",
     ])
 
 
 def bloc_hypotheses(ex, v):
     e = ex["entrees"]
     return tableau(["Hypothèse", "Valeur"], [
-        ("Données", f"**Cotations EURUSD 1M ILLUSTRATIVES, pas des données de marché.** Aucune donnée de volatilité réelle n'est utilisée ni disponible dans le dépôt."),
+        ("Données, frais, split", "**Cotations EURUSD 1M ILLUSTRATIVES, pas des données de marché** : aucune donnée de volatilité réelle dans le dépôt. Sans objet : frais, split TRAIN / VAL / TEST (ce n'est pas une stratégie, aucun PnL, aucun backtest)."),
         ("Cotations de l'exemple", f"spot S = {nb(e['S'], 4)} ; taux USD rd = {nb(e['rd'] * 100)} % ; taux EUR rf = {nb(e['rf'] * 100)} % ; maturité T = 1/12 an ; "
                                    f"ATM (DNS) = {nb(e['ATM'] * 100)} % ; RR25 = {nb(e['RR25'] * 100)} pt ; BF25 = {nb(e['BF25'] * 100)} pt ; delta {e['convention_delta']}"),
-        ("Ce que ça valide", "La **mécanique** : formules, conventions de delta, cohérence interne du smile. Pas un smile réel, pas de calibrage, pas de backtest."),
-        ("Paramètres de vérification", f"S = {nb(v['parametres']['S'])}, T = {nb(v['parametres']['T'])} an, rd = {nb(v['parametres']['rd'] * 100)} %, "
-                                       f"rf = {nb(v['parametres']['rf'] * 100)} %, σ = {nb(v['parametres']['sigma'] * 100)} % (les mêmes que `tests/test_options_fx.py`)"),
-        ("Monte Carlo", f"{nb(v['prix']['n_chemins_mc'], 0)} chemins antithétiques, graine {v['prix']['graine_mc']}, erreur-type calculée sur les paires ; critère : moins de 3 erreurs-types"),
-        ("Références indépendantes", "Black-Scholes-Merton écrit sur le spot (sans forward), différences finies centrées, formule fermée du delta, Monte Carlo"),
-        ("Frais, split TRAIN / VAL / TEST", "Sans objet : ce n'est pas une stratégie. Aucun PnL, aucun backtest."),
+        ("Ce que ça valide", "La **mécanique** : formules, conventions de delta, cohérence interne du smile. **Pas** un smile réel, pas de calibrage, pas de validation par une bibliothèque externe."),
+        ("Convention du butterfly", "BF25 de l'exemple lu comme BF « smile » (forme simple). Le BF coté par les courtiers est un BF de marché (strangle à vol unique) : `SmileVV.depuis_marche` le gère, écart chiffré [plus bas](#convention-du-butterfly)."),
+        ("Vérifications", f"S = {nb(v['parametres']['S'])}, T = {nb(v['parametres']['T'])} an, rd = {nb(v['parametres']['rd'] * 100)} %, rf = {nb(v['parametres']['rf'] * 100)} %, σ = {nb(v['parametres']['sigma'] * 100)} % "
+                          f"(les mêmes que `tests/test_options_fx.py`) ; Monte Carlo : {nb(v['prix']['n_chemins_mc'], 0)} chemins antithétiques, graine {v['prix']['graine_mc']}, critère moins de 3 erreurs-types."),
+        ("Références", "Black-Scholes-Merton écrit sur le spot (**réécriture de la même formule**), différences finies centrées, formule fermée du delta, Monte Carlo."),
     ])
+
+
+def bloc_bf(var):
+    lignes = [(c["cas"], nb(c["ATM"] * 100), nb(c["RR25"] * 100), nb(c["BF_marche"] * 100, 3), nb(c["BF_smile_equivalent"] * 100, 4),
+               nb(c["ecart_bf_points_de_vol"], 4), nb(c["ecart_max_vol_points"], 3)) for c in var["butterfly_marche"]]
+    t = tableau(["Cotations (EURUSD 1M, delta spot)", "ATM (%)", "RR25 (pt)", "BF de marché (pt)", "BF smile équivalent (pt)", "écart de BF (pt)", "écart max de vol du smile (pt)"],
+                lignes, ["---", "--:", "--:", "--:", "--:", "--:", "--:"])
+    return ("Le BF25 que cotent les courtiers est un butterfly **de marché** : une vol unique σ_ST = ATM + BF, des strikes 25Δ calculés avec cette vol, et le prix du strangle correspondant. "
+            "Le smile a une vol différente sur chaque jambe : son butterfly est (σ25C + σ25P)/2 − ATM (« BF smile »). Les deux ne sont pas égaux, car les strikes et les vols diffèrent.\n\n"
+            "`SmileVV(..., bf=...)` prend le BF smile : c'est la **forme simple utilisée dans tout ce dépôt, exemple compris**. "
+            "`SmileVV.depuis_marche(..., bf_marche=...)` fait la conversion : il cherche le BF smile dont le smile vanna-volga reprice exactement le strangle de marché (équation à une inconnue, `brentq`). "
+            "Écart de vol du smile entre les deux lectures, sur [K25P −3 %, K25C +3 %] :\n\n" + t)
 
 
 def bloc_validation(v):
     p = v["prix"]
-    t1 = tableau(["K", "type", "GK", "Black-Scholes (spot)", "écart", "Monte Carlo ± erreur-type", "z"], [
+    t1 = tableau(["K", "type", "GK", "BSM sur le spot (réécriture)", "écart", "Monte Carlo ± erreur-type", "z"], [
         (nb(l["K"], 4), l["type"], nb(l["gk"], 6), nb(l["bsm_spot"], 6), sci(l["ecart_bsm"]), f"{nb(l['mc'], 6)} ± {nb(l['erreur_type_mc'], 6)}", nb(l["z_mc"], 2))
         for l in p["lignes"]], ["--:", "---", "--:", "--:", "--:", "--:", "--:"])
     t2 = tableau(["Famille", "Vérification", "Erreur mesurée", "Tolérance du test", "Résultat"], [
         (fam, lib, nb(m, 2) if t >= 0.1 else sci(m), nb(t, 1) if t >= 0.1 else sci(t), "OK" if m <= t else "ÉCHEC") for lib, m, t, fam in lignes_validation(v)],
         ["---", "---", "--:", "--:", "---"])
     ex = v["deltas"]["call_pa_non_monotone"]
-    return (f"**Prix contre référence** (S = {nb(v['parametres']['S'])}, T = {nb(v['parametres']['T'])} an, rd = {nb(v['parametres']['rd'] * 100)} %, "
+    return (f"**Prix contre la réécriture BSM et contre Monte Carlo** (S = {nb(v['parametres']['S'])}, T = {nb(v['parametres']['T'])} an, rd = {nb(v['parametres']['rd'] * 100)} %, "
             f"rf = {nb(v['parametres']['rf'] * 100)} %, σ = {nb(v['parametres']['sigma'] * 100)} %, prix en monnaie domestique par unité de notionnel étranger)\n\n" + t1 +
             "\n\n**Parité, grecques, conventions de delta, smile** (`results/validation.json`)\n\n" + t2 +
             f"\n\nCas particulier vérifié : le delta d'un call premium-adjusted n'est **pas monotone** en K (maximum {nb(ex['delta_max'], 4)} atteint en K = {nb(ex['strike_du_max'], 4)}) ; "
@@ -376,4 +435,5 @@ if __name__ == "__main__":
     fig_hero(ex)
     fig_variantes(var)
     fig_validation(v)
-    injecter({"badges": bloc_badges(), "hypotheses": bloc_hypotheses(ex, v), "validation": bloc_validation(v), "variantes": bloc_variantes(var)})
+    injecter({"badges": bloc_badges(), "cles": bloc_cles(ex, v, var), "hypotheses": bloc_hypotheses(ex, v), "validation": bloc_validation(v),
+              "variantes": bloc_variantes(var), "bf": bloc_bf(var)})

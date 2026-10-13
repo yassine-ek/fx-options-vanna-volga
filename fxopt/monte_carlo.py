@@ -1,7 +1,7 @@
 """Monte Carlo minimal pour valider les prix Garman-Kohlhagen.
 
-Copie réduite de `gbm_exact` du laboratoire Monte Carlo du même auteur (projet 01, `mclab/modeles.py`,
-MIT). Le projet 06 étant un dépôt autonome, on ne dépend pas de `mclab` : seule la brique utile ici est
+Copie réduite de `gbm_exact` du dépôt monte-carlo-pricing-risk-lab du même auteur (`mclab/modeles.py`,
+MIT). Ce dépôt étant autonome, on ne dépend pas de `mclab` : seule la brique utile ici est
 reprise (GBM, schéma exact, variables antithétiques, un seul pas de temps jusqu'à l'échéance).
 """
 import numpy as np
