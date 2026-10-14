@@ -236,10 +236,6 @@ delta spot. BF25 lu comme BF « smile » (forme simple). Source des chiffres : `
 - Grecques en dérivées du prix dans la monnaie domestique, par unité de notionnel étranger (pas de conversion de prime en %).
 - Tests Monte Carlo à graine fixe : des statistiques à 3 erreurs-types peuvent échouer rarement pour une autre graine.
 
-## Comment ce projet a été construit
-
-Projet réalisé en octobre 2026 avec un assistant de programmation IA (Claude, Anthropic) que j'ai dirigé : choix des sujets, protocole, vérification des résultats. Tous les chiffres sont régénérés par les scripts du dépôt et contrôlés par les tests et la CI.
-
 ## Reproduire
 
 Aucune donnée externe à télécharger : les cotations de l'exemple sont dans le code.
